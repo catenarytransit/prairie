@@ -1,15 +1,21 @@
-//Written by C. Wen, then integrated with osr.rs
-#[allow(unused)]
+//Written by C. Wen, inspired by K. Chin
 pub mod graph_construction {
     //constructs and preprocesses the graph struct from OSM data
     use crate::graph::routing::*;
-    use crate::osr::*;
     use core::num;
-    use std::{collections::HashMap, ops::Index};
+    use std::{collections::HashMap, hash::Hash, ops::Index}; 
+    use osr_ffi::{Algorithm, Profile, Direction, ffi};
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
+    use std::{
+        env,
+        time::Instant,
+    };
+    
 
     #[derive(Debug, PartialEq, Hash, Eq, Clone, Copy, PartialOrd, Ord)]
     pub struct Node {
-        //nodes from OSM, each with unique ID and coordinate position
+        //nodes index from 
         pub id: i64,
         pub lat: i64,
         pub lon: i64,
@@ -23,6 +29,13 @@ pub mod graph_construction {
         pub refs: Vec<i64>,
     }
 
+    #[derive(Debug, Clone, Serialize)]
+    struct GraphInfo {
+    node_count: u64,
+    way_count: u64,
+    has_elevations: bool,
+    }
+
     #[derive(Debug, PartialEq, Clone)]
     pub struct RoadNetwork {
         //graph struct that will be used to route
@@ -31,123 +44,30 @@ pub mod graph_construction {
         pub raw_ways: Vec<Way>,
         pub raw_nodes: Vec<i64>,
     }
+    
 
     impl RoadNetwork {
-
         //need way to construct this from OSR stuff kyler wrote
-
-        pub fn new(mut nodes: HashMap<i64, Node>, ways: Vec<Way>) -> Self {
+        pub fn new() -> Self {
+            let path = "/path";
+            let router =  ffi::open_router(path).expect("OSR returned null router");
+            let graph = GraphInfo {
+                node_count: router.node_count(),
+                way_count: router.way_count(),
+                has_elevations: router.has_elevations(),
+            };
             //init new RoadNetwork based on results from reading .pbf file
             let mut edges: HashMap<i64, HashMap<i64, (u64, bool)>> = HashMap::new();
-            for way in ways.clone() {
-                let mut previous_head_node_now_tail: Option<&Node> = None;
-                let mut previous_head_node_index: usize = 0;
-                for i in 0..way.refs.len() - 1 {
-                    let tail_id = way.refs[i];
-                    let tail: Option<&Node> = match previous_head_node_now_tail {
-                        Some(previous_head_node_now_tail) => match previous_head_node_index == i {
-                            true => Some(previous_head_node_now_tail),
-                            false => nodes.get(&tail_id),
-                        },
-                        None => nodes.get(&tail_id),
-                    };
-
-                    let head_id = way.refs[i + 1];
-                    let head = nodes.get(&head_id);
-                    if let (Some(tail), Some(head)) = (tail, head) {
-                        //following math converts lon/lat into distance of segment
-                        let a = i128::pow(((head.lat - tail.lat) * 111229).into(), 2) as f64
-                            / f64::powi(10.0, 14);
-                        let b = i128::pow(((head.lon - tail.lon) * 71695).into(), 2) as f64
-                            / f64::powi(10.0, 14);
-                        let c = (a + b).sqrt();
-                        let cost = (c as u64) / ((way.speed as f64) * 5.0 / 18.0) as u64; //seconds needed to traverse segment based on road type
-                        let flag = false;
-                        edges
-                            .entry(tail_id)
-                            .and_modify(|inner| {
-                                inner.insert(head_id, (cost, flag));
-                            })
-                            .or_insert({
-                                let mut a = HashMap::new();
-                                a.insert(head_id, (cost, flag));
-                                a
-                            });
-                        edges
-                            .entry(head.id)
-                            .and_modify(|inner| {
-                                inner.insert(tail_id, (cost, flag));
-                            })
-                            .or_insert({
-                                let mut a = HashMap::new();
-                                a.insert(tail_id, (cost, flag));
-                                a
-                            });
-                        previous_head_node_now_tail = Some(head);
-                        previous_head_node_index = i + 1;
-                    }
-                }
-            }
-            let node_to_remove = nodes
-                .iter()
-                .filter(|(node, _)| !edges.contains_key(node))
-                .map(|(x, _)| *x)
-                .collect::<Vec<i64>>();
-            for node in &node_to_remove {
-                nodes.remove(node);
-            }
-
-            Self {
-                raw_ways: ways,
-                edges,
-                raw_nodes: nodes.clone().iter().map(|(&id, _)| id).collect(),
-                nodes,
-            }
+            let mut nodes = HashMap::new();
+            let mut raw_ways = Vec::new();
+            let mut raw_nodes = Vec::new();
+            Self { nodes, edges, raw_ways, raw_nodes }
         }
+    }
 
-        pub fn reduce_to_largest_connected_component(self) -> Self {
-            //reduces graph to largest connected component through nodes visited with dijkstra
-            let mut counter = 0;
-            let mut number_times_node_visted: HashMap<i64, i32> = HashMap::new();
-            let mut shortest_path_graph = Dijkstra::new(&self);
-            let mut max_connections = 0;
-
-            while let Some(source_id) =
-                shortest_path_graph.get_unvisted_node_id(&number_times_node_visted)
-            {
-                counter += 1;
-                let mut shortest_path_graph = Dijkstra::new(&self);
-                shortest_path_graph.dijkstra(source_id, -1, &None, false);
-                for node in shortest_path_graph.visited_nodes.keys() {
-                    number_times_node_visted.insert(*node, counter);
-                }
-                if number_times_node_visted.len() > (self.nodes.len() / 2) {
-                    break;
-                }
-            }
-            let mut new_node_list = Vec::new();
-            new_node_list = number_times_node_visted.iter().collect();
-            new_node_list.sort_by(|(node1, counter1), (node2, counter2)| counter1.cmp(counter2));
-
-            let connected_components = &mut new_node_list
-                .chunk_by(|(node1, counter1), (node2, counter2)| counter1 == counter2);
-
-            let mut largest_node_set = Vec::new();
-            let mut prev_set_size = 0;
-
-            while let Some(node_set) = connected_components.next() {
-                if node_set.len() > prev_set_size {
-                    largest_node_set = node_set.to_vec();
-                    prev_set_size = node_set.len();
-                }
-            }
-
-            let lcc_nodes = largest_node_set
-                .iter()
-                .map(|(id, _)| (**id, *self.nodes.get(id).unwrap()))
-                .collect::<HashMap<i64, Node>>();
-
-            RoadNetwork::new(lcc_nodes, self.raw_ways)
+    impl Default for RoadNetwork {
+        fn default() -> Self {
+            Self::new()
         }
     }
 }
@@ -203,27 +123,6 @@ pub mod routing {
         }
     }
 
-    pub fn a_star_heuristic(graph: &RoadNetwork, target: i64) -> HashMap<i64, u64> {
-        let tail = *graph.nodes.get(&target).unwrap();
-        //for each current i64 id, enter euciladan distance from current to target, divided by max speed on that path
-        let heuristics = graph
-            .nodes
-            .iter()
-            .map(|(id, head)| {
-                (
-                    *id,
-                    ((i128::pow(((head.lat - tail.lat) * 111229).into(), 2) as f64
-                        / f64::powi(10.0, 14)
-                        + i128::pow(((head.lon - tail.lon) * 71695).into(), 2) as f64
-                            / f64::powi(10.0, 14))
-                    .sqrt() as u64)
-                        / ((110_f64) * 5.0 / 18.0) as u64, //110 is motorway speed --> max speed possible on road network
-                )
-            })
-            .collect::<HashMap<i64, u64>>();
-        heuristics
-    }
-
     impl Dijkstra {
         //implementation of dijkstra's shortest path algorithm
         pub fn new(graph: &RoadNetwork) -> Self {
@@ -260,15 +159,15 @@ pub mod routing {
                 if self.visited_nodes.contains_key(&path.0) {
                     continue;
                 }
-                if (consider_arc_flags && !path.1 .1) {
+                if (consider_arc_flags && !path.1.1) {
                     continue;
                 }
-                paths.push((*self.graph.nodes.get(&path.0).unwrap(), path.1 .0));
+                paths.push((*self.graph.nodes.get(&path.0).unwrap(), path.1.0));
             }
             paths
         }
 
-        pub fn dijkstra(
+         pub fn dijkstra(
             &mut self,
             source_id: i64,
             target_id: i64,
@@ -316,7 +215,7 @@ pub mod routing {
             let mut counter = 1;
             let mut cost = 0;
             while !priority_queue.is_empty() {
-                let pathed_current_node = priority_queue.pop().unwrap().0 .1; //.0 "unwraps" from Reverse()
+                let pathed_current_node = priority_queue.pop().unwrap().0.1; //.0 "unwraps" from Reverse()
                 cost = pathed_current_node.distance_from_start;
                 let idx = pathed_current_node.node_self.id;
 
@@ -366,7 +265,7 @@ pub mod routing {
                 counter += 1;
             }
             (None, previous_nodes)
-        }
+        } 
 
         pub fn get_random_node_id(&mut self) -> Option<i64> {
             //returns ID of a random valid node from a graph
@@ -375,30 +274,6 @@ pub mod routing {
             let mut node_id = full_node_list.get(random).unwrap();
 
             Some(*node_id)
-        }
-
-        pub fn get_random_node_area_id(
-            &mut self,
-            lat_min: f32,
-            lat_max: f32,
-            lon_min: f32,
-            lon_max: f32,
-        ) -> i64 {
-            let lat_range =
-                (lat_min * f32::powi(10.0, 7)) as i64..(lat_max * f32::powi(10.0, 7)) as i64;
-            let lon_range =
-                (lon_min * f32::powi(10.0, 7)) as i64..(lon_max * f32::powi(10.0, 7)) as i64;
-            let mut found = false;
-            let mut id = -1;
-            while (!found) {
-                if let Some(node_id) = self.get_random_node_id() {
-                    if let Some(node) = self.graph.nodes.get(&node_id) {
-                        found = lat_range.contains(&node.lat) && lon_range.contains(&node.lon);
-                        id = node_id
-                    }
-                }
-            }
-            id
         }
 
         pub fn get_unvisted_node_id(
@@ -425,100 +300,12 @@ pub mod routing {
         }
 
         pub fn reset_all_flags(&mut self, state: bool) {
-            for (_, edgelist) in self.graph.edges.iter_mut() {
+            //for (_, edgelist) in self.graph.edges.iter_mut() {
+            for edgelist in self.graph.edges.values_mut() {
                 for edge in edgelist.iter_mut() {
-                    edge.1 .1 = state;
+                    edge.1.1 = state;
                 }
             }
-        }
-
-        pub fn backtrace_dijkstra(
-            &mut self,
-            source_id: i64,
-            target_id: i64,
-            heuristics: &Option<HashMap<i64, u64>>,
-            consider_arc_flags: bool,
-        ) -> HashSet<PathedNode> {
-            //Heap(distance, node), Reverse turns binaryheap into minheap (default is maxheap)
-            let mut priority_queue: BinaryHeap<Reverse<(u64, PathedNode)>> = BinaryHeap::new();
-            let mut v_nodes: HashSet<PathedNode> = HashSet::new();
-
-            //set target (-1) for all-node-settle rather than just target settle or smth
-            self.visited_nodes.clear();
-
-            let source = *self
-                .graph
-                .nodes
-                .get(&source_id)
-                .unwrap_or_else(|| panic!("source node not found"));
-
-            let source_node: PathedNode = PathedNode {
-                node_self: (source),
-                distance_from_start: 0,
-                parent_node: (None),
-            };
-
-            let mut gscore: HashMap<i64, u64> = HashMap::new();
-            gscore.insert(source_id, 0);
-
-            priority_queue.push(Reverse((0, source_node.clone())));
-
-            let mut target: Node = Node {
-                id: 0,
-                lon: 0,
-                lat: 0,
-            };
-            if target_id > 0 {
-                target = *self
-                    .graph
-                    .nodes
-                    .get(&target_id)
-                    .unwrap_or_else(|| panic!("target node not found"));
-            }
-
-            let mut counter = 1;
-            let mut cost = 0;
-            while !priority_queue.is_empty() {
-                let pathed_current_node = priority_queue.pop().unwrap().0 .1; //.0 "unwraps" from Reverse()
-                cost = pathed_current_node.distance_from_start;
-                let idx = pathed_current_node.node_self.id;
-
-                self.visited_nodes.insert(idx, cost);
-
-                //found target node
-                if idx.eq(&target_id) {
-                    return v_nodes;
-                }
-
-                let neighbors = self.get_neighbors(&pathed_current_node, consider_arc_flags);
-                for neighbor in neighbors {
-                    let temp_distance = pathed_current_node.distance_from_start + neighbor.1;
-                    let next_distance = *gscore.get(&neighbor.0.id).unwrap_or(&u64::MAX);
-
-                    if temp_distance < next_distance {
-                        gscore.insert(neighbor.0.id, temp_distance);
-                        let prev_node: Rc<PathedNode> = Rc::new(pathed_current_node.clone());
-                        let tentative_new_node = PathedNode {
-                            node_self: neighbor.0,
-                            distance_from_start: temp_distance,
-                            parent_node: Some(prev_node),
-                        };
-                        v_nodes.insert(tentative_new_node.clone());
-
-                        let h;
-                        if let Some(heuristic) = heuristics {
-                            h = heuristic.get(&neighbor.0.id).unwrap_or(&0);
-                        } else {
-                            h = &0;
-                        }
-
-                        //fscore = temp_distance (gscore) + h (hscore)
-                        priority_queue.push(Reverse((temp_distance + h, tentative_new_node)));
-                    }
-                }
-                counter += 1;
-            }
-            v_nodes
         }
     }
 }

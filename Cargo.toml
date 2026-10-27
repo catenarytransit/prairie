@@ -6,11 +6,7 @@ edition = "2024"
 [dependencies]
 rand = "*"
 anyhow = "*"
-axum = { version = "*", features = ["json"] }
-osr-ffi = { git = "https://github.com/catenarytransit/osr-ffi", rev = "8398f00a4c3a22e5226abcbfb7be761171dc0c19" }
+osr-ffi = { git = "https://github.com/catenarytransit/osr-ffi"}
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
-tokio = { version = "*", features = ["macros", "rt-multi-thread", "sync", "net"] }
-tower-http = { version = "*", features = ["fs"] }
-tracing = "*"
-tracing-subscriber = { version = "*", features = ["env-filter"] }
+# tokio = { version = "*", features = ["macros", "rt-multi-thread", "sync", "net"] }
