@@ -3,7 +3,7 @@ pub mod graph_construction {
     //constructs and preprocesses the graph struct from OSM data
     use crate::graph::routing::*;
     use core::num;
-    use std::{collections::HashMap, hash::Hash, ops::Index}; 
+    use std::{collections::{HashMap, HashSet}, hash::Hash, ops::Index}; 
     use osr_ffi::{Algorithm, Profile, Direction, ffi};
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
@@ -11,23 +11,6 @@ pub mod graph_construction {
         env,
         time::Instant,
     };
-    
-
-    #[derive(Debug, PartialEq, Hash, Eq, Clone, Copy, PartialOrd, Ord)]
-    pub struct Node {
-        //nodes index from 
-        pub id: i64,
-        pub lat: i64,
-        pub lon: i64,
-    }
-
-    #[derive(Debug, PartialEq, Hash, Eq, Clone)]
-    pub struct Way {
-        //ways from OSM, each with unique ID, speed from highway type, and referenced nodes that it connects
-        pub id: i64,
-        pub speed: u64,
-        pub refs: Vec<i64>,
-    }
 
     #[derive(Debug, Clone, Serialize)]
     struct GraphInfo {
@@ -39,13 +22,11 @@ pub mod graph_construction {
     #[derive(Debug, PartialEq, Clone)]
     pub struct RoadNetwork {
         //graph struct that will be used to route
-        pub nodes: HashMap<i64, Node>, // <node.id, node>
-        pub edges: HashMap<i64, HashMap<i64, (u64, bool)>>, // tail.id, <head.id, (cost, arcflag)>
-        pub raw_ways: Vec<Way>,
-        pub raw_nodes: Vec<i64>,
+        pub nodes: HashSet<u32>, // OSR node id
+        pub raw_ways: Vec<u32>, // OSR way id
+        pub edges: HashMap<u32, HashMap<u32, (u64, bool)>>, // tail.id, <head.id, (cost, arcflag)>
     }
     
-
     impl RoadNetwork {
         //need way to construct this from OSR stuff kyler wrote
         pub fn new() -> Self {
@@ -57,11 +38,10 @@ pub mod graph_construction {
                 has_elevations: router.has_elevations(),
             };
             //init new RoadNetwork based on results from reading .pbf file
-            let mut edges: HashMap<i64, HashMap<i64, (u64, bool)>> = HashMap::new();
-            let mut nodes = HashMap::new();
+            let mut edges: HashMap<u32, HashMap<u32, (u64, bool)>> = HashMap::new();
+            let mut nodes = HashSet::new();
             let mut raw_ways = Vec::new();
-            let mut raw_nodes = Vec::new();
-            Self { nodes, edges, raw_ways, raw_nodes }
+            Self { nodes,raw_ways, edges }
         }
     }
 
@@ -70,6 +50,7 @@ pub mod graph_construction {
             Self::new()
         }
     }
+    
 }
 
 #[allow(unused)]
@@ -87,7 +68,7 @@ pub mod routing {
     pub struct Dijkstra {
         //handle dijkstra calculations
         pub graph: RoadNetwork,
-        pub visited_nodes: HashMap<i64, u64>,
+        pub visited_nodes: HashMap<u32, u64>,
         cost_upper_bound: u64,
         max_settled_nodes: u64,
     }
@@ -95,7 +76,7 @@ pub mod routing {
     #[derive(Debug, PartialEq, Clone, Eq, PartialOrd, Ord, Hash)]
     pub struct PathedNode {
         //node that references parent nodes, used to create path from goal node to start node
-        pub node_self: Node,
+        pub node_self: u32, //nodeid
         pub distance_from_start: u64,
         pub parent_node: Option<Rc<PathedNode>>,
     }
@@ -109,9 +90,9 @@ pub mod routing {
             inner
         }
 
-        pub fn get_path(self) -> (Vec<Node>, u64) {
+        pub fn get_path(self) -> (Vec<u32>, u64) { //node id
             //uses reference to find the source node with parent_node == None
-            let mut shortest_path: Vec<Node> = Vec::new();
+            let mut shortest_path: Vec<u32> = Vec::new();  //nodeid
             let mut total_distance: u64 = self.distance_from_start;
             let mut current = self;
             while let Some(previous_node) = current.parent_node {
@@ -147,12 +128,12 @@ pub mod routing {
             &mut self,
             current: &PathedNode,
             consider_arc_flags: bool,
-        ) -> Vec<(Node, u64)> {
+        ) -> Vec<(u32, u64)> {  //nodeid
             //return node id of neighbors
             let mut paths = Vec::new();
             let mut next_node_edges = HashMap::new();
             //need some case to handle neighbor to parent instead of just parent to neighbor
-            if let Some(connections) = self.graph.edges.get_mut(&current.node_self.id) {
+            if let Some(connections) = self.graph.edges.get_mut(&current.node_self) {
                 next_node_edges.clone_from(connections);
             }
             for path in next_node_edges {
@@ -169,11 +150,11 @@ pub mod routing {
 
          pub fn dijkstra(
             &mut self,
-            source_id: i64,
-            target_id: i64,
-            heuristics: &Option<HashMap<i64, u64>>,
+            source_id: u32,
+            target_id: Option<u32>,
+            heuristics: &Option<HashMap<u32, u64>>,
             consider_arc_flags: bool,
-        ) -> (Option<PathedNode>, HashMap<i64, i64>) {
+        ) -> (Option<PathedNode>, HashMap<u32, u32>) {
             //Heap(distance, node), Reverse turns binaryheap into minheap (default is maxheap)
             let mut priority_queue: BinaryHeap<Reverse<(u64, PathedNode)>> = BinaryHeap::new();
             let mut previous_nodes = HashMap::new();
@@ -194,21 +175,18 @@ pub mod routing {
             };
 
             //stores distances of node relative to target
-            let mut gscore: HashMap<i64, u64> = HashMap::new();
+            let mut gscore: HashMap<u32, u64> = HashMap::new();
             gscore.insert(source_id, 0);
 
             priority_queue.push(Reverse((0, source_node.clone())));
 
-            let mut target: Node = Node {
-                id: 0,
-                lon: 0,
-                lat: 0,
-            };
-            if target_id > 0 {
+            let mut target = 0;
+
+            if let Some (targ_id) = target_id{
                 target = *self
                     .graph
                     .nodes
-                    .get(&target_id)
+                    .get(&targ_id)
                     .unwrap_or_else(|| panic!("target node not found"));
             }
 
@@ -217,13 +195,16 @@ pub mod routing {
             while !priority_queue.is_empty() {
                 let pathed_current_node = priority_queue.pop().unwrap().0.1; //.0 "unwraps" from Reverse()
                 cost = pathed_current_node.distance_from_start;
-                let idx = pathed_current_node.node_self.id;
+                let idx = pathed_current_node.node_self;
 
                 self.visited_nodes.insert(idx, cost);
 
+                #[allow(clippy::collapsible_if)]
                 //found target node
-                if idx.eq(&target_id) {
-                    return (Some(pathed_current_node), previous_nodes);
+                if let Some(targ_id) = &target_id {
+                    if idx.eq(targ_id) {
+                        return (Some(pathed_current_node), previous_nodes);
+                    }
                 }
 
                 //stop conditions
@@ -241,10 +222,10 @@ pub mod routing {
 
                 for neighbor in self.get_neighbors(&pathed_current_node, consider_arc_flags) {
                     let temp_distance = pathed_current_node.distance_from_start + neighbor.1;
-                    let next_distance = *gscore.get(&neighbor.0.id).unwrap_or(&u64::MAX);
+                    let next_distance = *gscore.get(&neighbor.0).unwrap_or(&u64::MAX);
 
                     if temp_distance < next_distance {
-                        gscore.insert(neighbor.0.id, temp_distance);
+                        gscore.insert(neighbor.0, temp_distance);
                         let prev_node: Rc<PathedNode> = Rc::new(pathed_current_node.clone());
                         let tentative_new_node = PathedNode {
                             node_self: neighbor.0,
@@ -253,13 +234,13 @@ pub mod routing {
                         };
                         let h;
                         if let Some(heuristic) = heuristics {
-                            h = heuristic.get(&neighbor.0.id).unwrap_or(&0);
+                            h = heuristic.get(&neighbor.0).unwrap_or(&0);
                         } else {
                             h = &0;
                         }
                         //fscore = temp_distance (gscore) + h (hscore)
                         priority_queue.push(Reverse((temp_distance + h, tentative_new_node)));
-                        previous_nodes.insert(neighbor.0.id, pathed_current_node.node_self.id);
+                        previous_nodes.insert(neighbor.0, pathed_current_node.node_self);
                     }
                 }
                 counter += 1;
@@ -267,20 +248,17 @@ pub mod routing {
             (None, previous_nodes)
         } 
 
-        pub fn get_random_node_id(&mut self) -> Option<i64> {
+        pub fn get_random_node_id(&mut self) -> Option<u32> {
             //returns ID of a random valid node from a graph
-            let mut full_node_list = &self.graph.raw_nodes;
-            let mut random: usize = rand::random_range(0..full_node_list.len());
-            let mut node_id = full_node_list.get(random).unwrap();
-
-            Some(*node_id)
+            let mut full_node_list = &self.graph.nodes;
+            full_node_list.iter().next().copied()
         }
 
         pub fn get_unvisted_node_id(
             //returns the first unvisted node that function parses upon (used to find largest connected component)
             &mut self,
-            other_located_nodes: &HashMap<i64, i32>,
-        ) -> Option<i64> {
+            other_located_nodes: &HashMap<u32, i32>,
+        ) -> Option<u32> {
             if other_located_nodes.len() == self.graph.nodes.len() {
                 println!("all nodes visted");
                 return None;
@@ -289,11 +267,11 @@ pub mod routing {
                 .iter()
                 .filter(|(id, count)| **count > 0)
                 .map(|(id, _)| id)
-                .collect::<Vec<&i64>>();
+                .collect::<Vec<&u32>>();
 
             for node in &self.graph.nodes {
-                if !other_located_nodes.contains(&node.0) {
-                    return Some(*node.0);
+                if !other_located_nodes.contains(&node) {
+                    return Some(*node);
                 }
             }
             None

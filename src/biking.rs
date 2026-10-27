@@ -9,7 +9,7 @@ mod contraction_hierarchies {
     };
 
     pub struct ContractedGraph {
-        pub ordered_nodes: HashMap<i64, u32>, //id, order number
+        pub ordered_nodes: HashMap<u32, u32>, //id, order number
     }
 
     impl ContractedGraph {
@@ -30,7 +30,7 @@ mod contraction_hierarchies {
 
         pub fn contract_node(
             &mut self,
-            node_id: i64,
+            node_id: u32,
             graph: &mut Dijkstra,
             compute_edge_diff_only: bool,
         ) -> (u8, i8) {
@@ -78,7 +78,7 @@ mod contraction_hierarchies {
 
             let mut temp_shortcuts = HashMap::new();
             for (u, cost_uv) in costs_of_uv.iter() {
-                graph.dijkstra(*u, -1, &None, true);
+                graph.dijkstra(*u, None, &None, true);
                 for (w, cost_vw) in costs_of_vw.iter() {
                     if w == u {
                         continue;
@@ -135,8 +135,8 @@ mod contraction_hierarchies {
             graph.set_max_settled_nodes(20);
 
             //step 1: calculate initial e_d order --> PQ with (k: e_d, v: node)
-            let mut priority_queue: BinaryHeap<Reverse<(i8, i64)>> = BinaryHeap::new();
-            for &n in graph.graph.raw_nodes.clone().iter() {
+            let mut priority_queue: BinaryHeap<Reverse<(i8, u32)>> = BinaryHeap::new();
+            for &n in graph.graph.nodes.clone().iter() {
                 let (_, e_d) = self.contract_node(n, graph, true);
                 priority_queue.push(Reverse((e_d, n)));
             }
@@ -177,12 +177,12 @@ mod contraction_hierarchies {
 
         pub fn bidirectional_compute(
             graph: &mut Dijkstra,
-            source_id: i64,
-            target_id: i64,
-        ) -> (u64, i64) {
-            graph.dijkstra(source_id, target_id, &None, true);
+            source_id: u32,
+            target_id: u32,
+        ) -> (u64, u32) {
+            graph.dijkstra(source_id, Some(target_id), &None, true);
             let dist_source_to_u = graph.visited_nodes.clone();
-            graph.dijkstra(target_id, source_id, &None, true);
+            graph.dijkstra(target_id, Some(source_id), &None, true);
             let dist_target_to_u = &graph.visited_nodes;
 
             let mut distances_s_t = Vec::new();
